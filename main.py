@@ -1,23 +1,126 @@
+import logging
 import os
+import sqlite3
+import time
 import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from litellm import completion
+from litellm import completion, completion_cost
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
-app = FastAPI()
+# One row per chat message (messages) plus one row per LLM call (llm_calls,
+# linked via message_id to the assistant reply it produced). Keep all SQL in
+# these helper functions - a later Postgres switch touches only this file.
+DB_PATH = os.getenv("DB_PATH", "sessions.db")
 
-# In-memory session store: {session_id: [messages]}
-# Resets on every restart/redeploy - fine while testing, swap for a
-# Supabase table later when sessions need to survive a deploy.
-sessions: dict[str, list[dict]] = {}
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id);
+
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id INTEGER PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    message_id INTEGER,
+    call_type TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    reasoning_tokens INTEGER,
+    cost_usd REAL,
+    latency_ms INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_calls_session_id ON llm_calls(session_id);
+"""
+
+
+def init_db() -> None:
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(SCHEMA_SQL)
+    conn.commit()
+    conn.close()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+def get_recent_messages(session_id: str, limit: int) -> list[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT role, content FROM messages WHERE session_id = ? "
+        "ORDER BY id DESC LIMIT ?",
+        (session_id, limit),
+    ).fetchall()
+    conn.close()
+    return [{"role": role, "content": content} for role, content in reversed(rows)]
+
+
+def save_turn(
+    session_id: str,
+    user_message: str,
+    assistant_reply: str,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    reasoning_tokens: int | None,
+    cost_usd: float | None,
+    latency_ms: int,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (session_id, "user", user_message, now),
+        )
+        cur.execute(
+            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (session_id, "assistant", assistant_reply, now),
+        )
+        message_id = cur.lastrowid
+        cur.execute(
+            """
+            INSERT INTO llm_calls (
+                session_id, message_id, call_type, model,
+                input_tokens, output_tokens, reasoning_tokens,
+                cost_usd, latency_ms, created_at
+            ) VALUES (?, ?, 'chat', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, message_id, model, input_tokens, output_tokens,
+             reasoning_tokens, cost_usd, latency_ms, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
 
 MODEL = os.getenv("LLM_MODEL", "openai/gpt-5-nano")
 MAX_HISTORY_MESSAGES = 20  # simple context guard - keep only the recent tail
-MAX_OUTPUT_TOKENS = 300  # headroom for reasoning + a short reply - avoids empty responses
+MAX_OUTPUT_TOKENS = 500  # headroom for reasoning + a short reply - avoids empty responses
+LLM_TIMEOUT_SECONDS = 30  # fail instead of hanging forever if the provider stalls
+LLM_MAX_RETRIES = 1  # one retry for transient errors (timeouts, rate limits, etc.)
 
 SYSTEM_PROMPT = {
     "role": "system",
@@ -39,7 +142,7 @@ class ChatResponse(BaseModel):
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     session_id = req.session_id or str(uuid.uuid4())
-    history = sessions.setdefault(session_id, [])
+    history = get_recent_messages(session_id, MAX_HISTORY_MESSAGES)
 
     history.append({"role": "user", "content": req.message})
 
@@ -48,28 +151,52 @@ def chat(req: ChatRequest):
     trimmed = history[-MAX_HISTORY_MESSAGES:]
     messages = [SYSTEM_PROMPT] + trimmed
 
-    response = completion(
-        model=MODEL,
-        messages=messages,
-        reasoning_effort="minimal",
-        max_tokens=MAX_OUTPUT_TOKENS,
-    )
-    reply = response.choices[0].message.content
+    start = time.monotonic()
+    try:
+        response = completion(
+            model=MODEL,
+            messages=messages,
+            reasoning_effort="minimal",
+            max_tokens=MAX_OUTPUT_TOKENS,
+            timeout=LLM_TIMEOUT_SECONDS,
+            num_retries=LLM_MAX_RETRIES,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"LLM request failed: {e}")
+    latency_ms = int((time.monotonic() - start) * 1000)
+
+    reply = response.choices[0].message.content or "(no response generated)"
 
     usage = response.usage
-    reasoning_tokens = 0
+    reasoning_tokens = None
     if usage.completion_tokens_details:
-        reasoning_tokens = usage.completion_tokens_details.reasoning_tokens or 0
-    output_tokens = usage.completion_tokens - reasoning_tokens
+        reasoning_tokens = usage.completion_tokens_details.reasoning_tokens
+    output_tokens = usage.completion_tokens - (reasoning_tokens or 0)
 
-    print(
+    try:
+        cost_usd = completion_cost(completion_response=response)
+    except Exception:
+        cost_usd = None
+        logging.warning(f"completion_cost failed for model={MODEL}")
+
+    logging.info(
         f"[tokens] input={usage.prompt_tokens} "
-        f"thinking={reasoning_tokens} "
+        f"thinking={reasoning_tokens or 0} "
         f"output={output_tokens} "
         f"total={usage.total_tokens}"
     )
 
-    history.append({"role": "assistant", "content": reply})
+    save_turn(
+        session_id=session_id,
+        user_message=req.message,
+        assistant_reply=reply,
+        model=MODEL,
+        input_tokens=usage.prompt_tokens,
+        output_tokens=output_tokens,
+        reasoning_tokens=reasoning_tokens,
+        cost_usd=cost_usd,
+        latency_ms=latency_ms,
+    )
 
     return ChatResponse(session_id=session_id, reply=reply, context=messages)
 

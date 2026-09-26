@@ -1,0 +1,70 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+PakGPT is a minimal FastAPI chat backend backed by an LLM (via LiteLLM, so any provider LiteLLM supports can be swapped in through `LLM_MODEL`), plus a Streamlit console for manually exercising it. It's a two-file prototype, not a package — there's no build step, test suite, or linter configured.
+
+## Running it
+
+Activate the venv first (Windows): `venv\Scripts\activate.bat`
+
+Start the API:
+```
+uvicorn main:app --reload --port 8000
+```
+
+Start the test console (in a separate terminal, API must already be running):
+```
+streamlit run streamlit.py
+```
+
+Install/update dependencies: `pip install -r requirements.txt`
+
+### Docker
+
+`docker compose up --build` runs both services. The API is at `http://127.0.0.1:8000`, the console at `http://127.0.0.1:8501` (both bound to localhost only, since `/chat` has no auth). Session history persists across `docker compose down && up` in the `sessions-data` named volume, mounted at `/app/data` in the `api` container (`DB_PATH` is set to `/app/data/sessions.db` there — mounting a volume at `/app` itself would shadow the image's code on every rebuild, so don't move it).
+
+`requirements-api.txt` and `requirements-streamlit.txt` list only each service's *direct* dependencies (pinned), letting pip resolve the transitive closure at build time — `requirements.txt` (the full frozen set for local/venv use) isn't safe to split by hand, since packages like `tiktoken`/`huggingface-hub` look Streamlit-related but are actually pulled in by `litellm`. Keep all three files in sync when a direct dependency's version changes.
+
+## Configuration
+
+Environment variables are loaded from `.env` (gitignored):
+- `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` — provider keys consumed by LiteLLM based on which `LLM_MODEL` is selected.
+- `LLM_MODEL` — LiteLLM model string, e.g. `openai/gpt-5-nano` (default). Change the provider prefix to switch providers.
+- `DB_PATH` — SQLite file path for session storage (default `sessions.db`).
+- `API_URL` — used only by `streamlit.py` to reach the FastAPI backend (default `http://127.0.0.1:8000/chat`).
+
+## Architecture
+
+`main.py` is the entire backend:
+- A single `POST /chat` endpoint takes `{session_id?, message}` and returns `{session_id, reply, context}`. `session_id` is generated (`uuid4`) when omitted, so a client's first call has no session and every later call in that conversation must pass back the returned `session_id`.
+- Conversation state lives in two SQLite tables (`sessions.db`): `messages` (one row per chat message: `session_id, role, content, created_at`) and `llm_calls` (one row per LLM call: tokens, `cost_usd`, `latency_ms`, linked to the assistant message it produced via `message_id`). Schema + indexes + `PRAGMA journal_mode=WAL` are created once at FastAPI startup via a `lifespan` handler (`init_db()`), not per request.
+- `get_recent_messages()` queries only the last `MAX_HISTORY_MESSAGES` (20) rows for a session (`ORDER BY id DESC LIMIT n`, reversed in Python) — the full history is never loaded. `save_turn()` writes the user message, assistant message, and the `llm_calls` row in one transaction, only after a successful LLM call; a failed call writes nothing.
+- The model call goes through `litellm.completion`, which normalizes providers behind one interface — swapping `LLM_MODEL`'s prefix (`openai/`, `anthropic/`, `gemini/`, etc.) is enough to change providers without touching the call site.
+- Cost is computed via `litellm.completion_cost(completion_response=response)`; if the model isn't in litellm's cost map this raises, so it's wrapped in a try/except that stores `cost_usd = NULL` and logs a warning naming the model — the request still succeeds. `latency_ms` wraps only the `completion()` call.
+- Token usage and cost-calculation warnings go through `logging` (`logging.basicConfig(level=logging.INFO)`), not `print()`.
+- Errors from the LLM call are caught broadly and surfaced as a 502 with the underlying exception message.
+- `scripts/migrate_sessions.py` is a one-off migration for the previous JSON-blob schema: it copies each legacy session's messages into `messages` (in original order; every migrated message gets that session's old `updated_at` as its `created_at`, since the blob format never recorded per-message timestamps) and renames the old `sessions` table to `sessions_legacy` (never dropped). Safe to re-run — it no-ops once `sessions` no longer exists. Run locally with `python scripts/migrate_sessions.py` (from the repo root, matching `DB_PATH`'s default), or against the Docker volume with `docker compose exec api python scripts/migrate_sessions.py`.
+
+`streamlit.py` is a standalone manual test console, not part of the API: it POSTs to `API_URL`, keeps a client-side `st.session_state.history` of all turns in the run, and lets you inspect the exact `context` (message list) sent to the model for each turn via an expander. It is not authoritative for session state — the backend's SQLite store is.
+
+## Development principles
+
+This is a lean prototype. Keep it that way.
+
+- **Smallest change that works.** Solve exactly what was asked. No speculative features, config options, or "for later" abstractions.
+- **Extend, don't add.** Prefer editing existing functions over new files, classes, or layers. Reuse `init_db`/`get_recent_messages`/`save_turn` rather than writing parallel logic. Keep the two-file structure unless asked to split it.
+- **No new dependencies** without asking first.
+- **No boilerplate.** No single-use wrapper functions or classes, no comments that restate the code, no defensive checks for states that can't happen.
+- **Stay in scope.** Don't refactor, rename, or reformat code unrelated to the task.
+- **Efficient at runtime.** No repeated per-request work that can happen once at startup, no redundant DB or network calls.
+- **Plan first, with a size estimate.** Before implementing, state the files touched and approximate lines changed. If a change will exceed ~50 lines, stop and explain why before writing it.
+- **After implementing**, summarize the diff in 2–3 lines and flag anything that could be removed.
+- **Keep this file current.** Update CLAUDE.md in the same change when behavior, config, or run instructions change.
+
+## Known gaps to be aware of
+
+- No automated tests exist in this repo.
+- `*.db` is gitignored, so `sessions.db` stays untracked — it's never meant to be committed (it contains real conversation history).
