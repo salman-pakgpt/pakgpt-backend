@@ -22,6 +22,7 @@ QUERIES = {
             MIN(created_at) AS first_call_at,
             MAX(created_at) AS last_call_at
         FROM llm_calls
+        WHERE is_test = 0
         GROUP BY session_id
         ORDER BY cost_usd DESC
         """,
@@ -39,6 +40,7 @@ QUERIES = {
             SUM(cost_usd) AS cost_usd,
             AVG(latency_ms) AS avg_latency_ms
         FROM llm_calls
+        WHERE is_test = 0
         GROUP BY model
         ORDER BY cost_usd DESC
         """,
@@ -56,6 +58,7 @@ QUERIES = {
             SUM(cost_usd) AS cost_usd,
             AVG(latency_ms) AS avg_latency_ms
         FROM llm_calls
+        WHERE is_test = 0
         GROUP BY day
         ORDER BY day
         """,

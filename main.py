@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS messages (
     session_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    is_test INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id);
@@ -41,17 +42,27 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     reasoning_tokens INTEGER,
     cost_usd REAL,
     latency_ms INTEGER NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    is_test INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_calls_session_id ON llm_calls(session_id);
 """
 
 
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, coltype: str) -> None:
+    cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})")]
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
 def init_db() -> None:
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA_SQL)
+    # covers DBs created before is_test existed - CREATE TABLE IF NOT EXISTS above is a no-op on them
+    _ensure_column(conn, "messages", "is_test", "INTEGER NOT NULL DEFAULT 0")
+    _ensure_column(conn, "llm_calls", "is_test", "INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     conn.close()
 
@@ -86,18 +97,19 @@ def save_turn(
     reasoning_tokens: int | None,
     cost_usd: float | None,
     latency_ms: int,
+    is_test: bool = False,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     conn = sqlite3.connect(DB_PATH)
     try:
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, "user", user_message, now),
+            "INSERT INTO messages (session_id, role, content, created_at, is_test) VALUES (?, ?, ?, ?, ?)",
+            (session_id, "user", user_message, now, is_test),
         )
         cur.execute(
-            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-            (session_id, "assistant", assistant_reply, now),
+            "INSERT INTO messages (session_id, role, content, created_at, is_test) VALUES (?, ?, ?, ?, ?)",
+            (session_id, "assistant", assistant_reply, now, is_test),
         )
         message_id = cur.lastrowid
         cur.execute(
@@ -105,11 +117,11 @@ def save_turn(
             INSERT INTO llm_calls (
                 session_id, message_id, call_type, model,
                 input_tokens, output_tokens, reasoning_tokens,
-                cost_usd, latency_ms, created_at
-            ) VALUES (?, ?, 'chat', ?, ?, ?, ?, ?, ?, ?)
+                cost_usd, latency_ms, created_at, is_test
+            ) VALUES (?, ?, 'chat', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (session_id, message_id, model, input_tokens, output_tokens,
-             reasoning_tokens, cost_usd, latency_ms, now),
+             reasoning_tokens, cost_usd, latency_ms, now, is_test),
         )
         conn.commit()
     finally:
@@ -127,10 +139,13 @@ SYSTEM_PROMPT = {
     "content": "Respond in 1-3 sentences only. Be concise and direct.",
 }
 
+DRY_RUN_REPLY = "This is a canned dry-run reply - no LLM call was made."
+
 
 class ChatRequest(BaseModel):
     session_id: str | None = None  # omit on the first message, we'll create one
     message: str
+    dry_run: bool = False  # skip the real LLM call - zero cost, for testing the request/DB path
 
 
 class ChatResponse(BaseModel):
@@ -150,6 +165,22 @@ def chat(req: ChatRequest):
     # context length bounded as a conversation grows.
     trimmed = history[-MAX_HISTORY_MESSAGES:]
     messages = [SYSTEM_PROMPT] + trimmed
+
+    if req.dry_run:
+        reply = DRY_RUN_REPLY
+        save_turn(
+            session_id=session_id,
+            user_message=req.message,
+            assistant_reply=reply,
+            model="dry-run",
+            input_tokens=0,
+            output_tokens=0,
+            reasoning_tokens=None,
+            cost_usd=0.0,
+            latency_ms=0,
+            is_test=True,
+        )
+        return ChatResponse(session_id=session_id, reply=reply, context=messages)
 
     start = time.monotonic()
     try:
