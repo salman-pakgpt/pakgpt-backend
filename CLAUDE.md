@@ -47,6 +47,7 @@ Environment variables are loaded from `.env` (gitignored):
 - Token usage and cost-calculation warnings go through `logging` (`logging.basicConfig(level=logging.INFO)`), not `print()`.
 - Errors from the LLM call are caught broadly and surfaced as a 502 with the underlying exception message.
 - `scripts/migrate_sessions.py` is a one-off migration for the previous JSON-blob schema: it copies each legacy session's messages into `messages` (in original order; every migrated message gets that session's old `updated_at` as its `created_at`, since the blob format never recorded per-message timestamps) and renames the old `sessions` table to `sessions_legacy` (never dropped). Safe to re-run — it no-ops once `sessions` no longer exists. Run locally with `python scripts/migrate_sessions.py` (from the repo root, matching `DB_PATH`'s default), or against the Docker volume with `docker compose exec api python scripts/migrate_sessions.py`.
+- `scripts/llm_usage.py` is an on-demand reporting script: it queries `llm_calls` and writes (overwriting) three CSVs into a `reports/` folder (gitignored) — `llm_usage_by_session.csv`, `llm_usage_by_model.csv`, `llm_usage_by_day.csv` — each with call count, token totals, `cost_usd`, and `avg_latency_ms` for that grouping. Run the same way as the migration script: locally (`python scripts/llm_usage.py`) or against the Docker volume (`docker compose exec api python scripts/llm_usage.py`).
 
 `streamlit.py` is a standalone manual test console, not part of the API: it POSTs to `API_URL`, keeps a client-side `st.session_state.history` of all turns in the run, and lets you inspect the exact `context` (message list) sent to the model for each turn via an expander. It is not authoritative for session state — the backend's SQLite store is.
 
@@ -63,6 +64,14 @@ This is a lean prototype. Keep it that way.
 - **Plan first, with a size estimate.** Before implementing, state the files touched and approximate lines changed. If a change will exceed ~50 lines, stop and explain why before writing it.
 - **After implementing**, summarize the diff in 2–3 lines and flag anything that could be removed.
 - **Keep this file current.** Update CLAUDE.md in the same change when behavior, config, or run instructions change.
+
+## Testing & manual verification
+
+Every LLM call through `/chat` is real — it spends real tokens and real money, and (post-refactor) it's permanently logged in `llm_calls` alongside genuine usage. There's no mock/sandbox mode. Keep that in mind when verifying behavior:
+
+- **Test session_ids must be clearly marked and timestamped**, e.g. `test-<purpose>-<UTC YYYYMMDDHHMMSS>` (e.g. `test-ctxwindow-20260927154812`) — never a bare, reusable name like `ctx-test`. This keeps repeated test runs from landing on the same `session_id` (so they don't visually merge into what looks like one long conversation) and keeps them identifiable later in `llm_usage_*.csv`/`llm_calls` as test traffic, not real usage.
+- **Minimize the number of real LLM calls a test needs.** Every live `/chat` call costs tokens; don't spend 25 of them to prove something that doesn't require 25 real completions. E.g. to verify context-window trimming, seed the `messages` table directly via SQL (fake rows, no LLM involved) to build up history, then make exactly one real `/chat` call to confirm the read/trim path — not a loop of real calls building history one at a time.
+- **Test data is never auto-deleted** — it accumulates in `sessions.db`/`llm_calls` exactly like real usage, and stays there. Clear naming (above) is how it's kept distinguishable, not cleanup after the fact. Deleting rows is a real, destructive action — only do it if explicitly asked.
 
 ## Known gaps to be aware of
 

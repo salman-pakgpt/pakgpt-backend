@@ -8,3 +8,4 @@ __pycache__/
 *.db-journal
 .DS_Store
 notepad.txt
+reports/
