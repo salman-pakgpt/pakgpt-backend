@@ -128,7 +128,10 @@ def save_turn(
         conn.close()
 
 
-MODEL = os.getenv("LLM_MODEL", "openai/gpt-5-nano")
+MODEL = os.getenv("LLM_MODEL", "gemini/gemini-3.5-flash-lite")
+# cheapest setting each provider accepts (gemini-3.8-flash rejects "minimal"); unlisted providers send none
+REASONING_EFFORT_BY_PROVIDER = {"openai": "minimal", "gemini": "low"}
+REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT") or REASONING_EFFORT_BY_PROVIDER.get(MODEL.split("/")[0])
 MAX_HISTORY_MESSAGES = 20  # simple context guard - keep only the recent tail
 MAX_OUTPUT_TOKENS = 500  # headroom for reasoning + a short reply - avoids empty responses
 LLM_TIMEOUT_SECONDS = 30  # fail instead of hanging forever if the provider stalls
@@ -187,7 +190,7 @@ def chat(req: ChatRequest):
         response = completion(
             model=MODEL,
             messages=messages,
-            reasoning_effort="minimal",
+            reasoning_effort=REASONING_EFFORT,
             max_tokens=MAX_OUTPUT_TOKENS,
             timeout=LLM_TIMEOUT_SECONDS,
             num_retries=LLM_MAX_RETRIES,
