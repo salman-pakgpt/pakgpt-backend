@@ -66,6 +66,7 @@ This is a lean prototype. Keep it that way.
 - **Plan first, with a size estimate.** Before implementing, state the files touched and approximate lines changed. If a change will exceed ~50 lines, stop and explain why before writing it.
 - **After implementing**, summarize the diff in 2–3 lines and flag anything that could be removed.
 - **Keep this file current.** Update CLAUDE.md in the same change when behavior, config, or run instructions change.
+- **Keep `PRODUCT_SPEC.md` current too.** It's the handover doc (current state + next steps). When a change ships, update its affected sections, tick or rewrite the relevant next steps, add a decision-log row for any real decision, and bump its "Last updated" date and commit.
 
 ## Testing & manual verification
 
