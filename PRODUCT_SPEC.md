@@ -116,7 +116,7 @@ There is no `users` table yet. Tables are created, and new columns added, automa
 All settings come from `.env`, which is never committed. Full table in [README.md](README.md#configuration).
 
 - `GEMINI_API_KEY` (plus `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` if those providers are used).
-- `LLM_MODEL`: the only setting needed to switch models. Currently `gemini/gemini-3.8-flash`. Keep the `gemini/` prefix: without it LiteLLM goes to Vertex AI and needs full Google Cloud credentials.
+- `CHAT_LLM`, `EXTRACTION_LLM`, `COMPACTION_LLM`: the model for each task, set as literal values. Currently chat is on `gemini/gemini-3.8-flash`, and extraction and compaction are on `gemini/gemini-3.5-flash-lite`. Unset ones fall back to the previous task's model, and finally to the legacy `LLM_MODEL`. Keep the `gemini/` prefix: without it LiteLLM goes to Vertex AI and needs full Google Cloud credentials. The `LLM_MODEL_1`/`LLM_MODEL_2` lines in `.env` are only a reference list of available models, and the app never reads them.
 - The reasoning setting is chosen automatically from the provider (`gemini` → `low`, `openai` → `minimal`). `LLM_REASONING_EFFORT` overrides it but is normally unset.
 - `DB_PATH` and `API_URL` point at the database file and the API.
 
@@ -336,7 +336,7 @@ The two workstreams can run in either order or in parallel, with one constraint:
 
 - [ ] **Run the existing Docker Compose stack as-is** on the Oracle Cloud free-tier VM (the owner provides access).
 - [ ] **Add Caddy as a reverse proxy** for automatic HTTPS. No app changes are needed for this.
-- [ ] **Gemini on the VM:** create `.env` there with the free-tier `GEMINI_API_KEY` and `LLM_MODEL`. The code already defaults to Gemini, so this is configuration only.
+- [ ] **Gemini on the VM:** create `.env` there with the free-tier `GEMINI_API_KEY` and `CHAT_LLM` / `EXTRACTION_LLM` / `COMPACTION_LLM`. The code already defaults to Gemini, so this is configuration only.
 
 **Things to know:**
 
@@ -376,4 +376,5 @@ The two workstreams can run in either order or in parallel, with one constraint:
 | 2026-10-01 | Profile extraction runs in FastAPI `BackgroundTasks` | No new dependency, and the reply isn't delayed. Accepted in return: jobs are lost on restart, there is no retry, and the profile lags one message. |
 | 2026-10-01 | Extraction and compaction reuse `LLM_MODEL` | No new config for v1. Superseded the same day by the row below. |
 | 2026-10-01 | One model setting per task (`CHAT_LLM`, `EXTRACTION_LLM`, `COMPACTION_LLM`) with a fallback chain | Free-tier quota is per model, so splitting tasks spreads it. Leaving the settings unset changes nothing. Also allows compaction on a third, lighter model later. |
+| 2026-10-01 | `PROFILE_MAX_INJECT_WORDS` leaves out whole entries rather than cutting the text | A fact cut mid-sentence can change meaning. The cap and the warning still hold, as the addendum asks. |
 | 2026-10-01 | `ProfileOperation.content` is required | With it optional, `gemini-3.5-flash-lite` returned an `update` with no content, and the correction was lost. |

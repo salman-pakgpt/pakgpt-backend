@@ -319,11 +319,10 @@ def chat(req: ChatRequest, background_tasks: BackgroundTasks):
         latency_ms=latency_ms,
     )
     # runs after the response is sent; dry runs never get here, so they never pay for extraction
-    if PROFILE_EXTRACTION_ENABLED:
-        background_tasks.add_task(
-            profile_manager.process_message_for_profile,
-            DEFAULT_USER_ID, session_id, user_message_id, req.message,
-        )
+    background_tasks.add_task(
+        profile_manager.process_message_for_profile,
+        DEFAULT_USER_ID, session_id, user_message_id, req.message,
+    )
 
     return ChatResponse(session_id=session_id, reply=reply, context=messages)
 

@@ -34,7 +34,8 @@ class ProfileOperation(BaseModel):
 
 class ExtractionResult(BaseModel):
     has_update: bool
-    operations: list[ProfileOperation] = []
+    # no default: a default lands in the JSON schema, which OpenAI's strict mode may reject
+    operations: list[ProfileOperation]
 
 
 class CompactionResult(BaseModel):
@@ -91,7 +92,9 @@ def get_active_profile(user_id: str) -> dict[str, list[tuple[int, str]]]:
 
 
 def _render(user_id: str, heading: str, separator: str, max_words: int | None = None) -> str:
-    """Entries in CATEGORIES order; with max_words, entries that would exceed it are left out."""
+    """Entries in CATEGORIES order. With max_words, an entry that would push the total past it is
+    left out whole rather than cut mid-sentence (a half fact can change meaning), and later entries
+    that still fit are kept."""
     profile = get_active_profile(user_id)
     sections, words, dropped = [], 0, 0
     for category, title in CATEGORIES.items():
@@ -124,6 +127,8 @@ def get_active_profile_markdown(user_id: str) -> str:
 def process_message_for_profile(user_id: str, session_id: str, message_id: int, message_text: str) -> None:
     """Runs extraction, applies operations, triggers compaction if needed.
     This is the function passed to background_tasks.add_task(); failures are logged, never raised."""
+    if not main.PROFILE_EXTRACTION_ENABLED:
+        return
     try:
         with _lock:
             _update_profile(user_id, session_id, message_id, message_text)

@@ -36,8 +36,8 @@ The review in PRODUCT_SPEC.md §9 found gaps in the original text below, and all
     - `PROFILE_EXTRACTION_MAX_TOKENS` and `PROFILE_COMPACTION_MAX_TOKENS` (default 500).
     - `PROFILE_EXTRACTION_ENABLED` and `PROFILE_COMPACTION_ENABLED` (default on).
 
-    The owner mentioned a "Configuration" addendum. It isn't part of this document, so the `PROFILE_MAX_INJECT_WORDS` default and behavior were chosen at build time.
-18. **`ProfileOperation.content` is required** (`str`, with an empty string for `delete`), not `Optional[str]`. With it optional, `gemini-3.5-flash-lite` returned an `update` with no content, and the correction was lost.
+    These match the "Configuration" addendum at the end of this document, with one deliberate difference. When `PROFILE_MAX_INJECT_WORDS` would be exceeded, entries that don't fit are **left out whole** rather than the text being cut mid-sentence, because a half fact can change meaning. Later entries that still fit are kept, so short entries such as instructions survive one long entry. The cap is never exceeded, and a warning is still logged.
+18. **`ProfileOperation.content` is required** (`str`, with an empty string for `delete`), not `Optional[str]`. With it optional, `gemini-3.5-flash-lite` returned an `update` with no content, and the correction was lost. Likewise, `ExtractionResult.operations` has no `= []` default. A default ends up in the JSON schema, which OpenAI's strict structured-output mode (used for `openai/` models) may reject.
 
 ---
 
@@ -331,3 +331,30 @@ Both are resolved; see approved changes 13 and 14 above.
 
 - Streamlit polling approach (option 1 vs 2 above).
 - Whether empty categories are omitted or placeholder-shown in the markdown output.
+
+---
+
+## Configuration (addendum, received 2026-10-01)
+
+All settings are env vars. Defaults keep the behavior described above. As built, they are read in `main.py` and used by `profile_manager.py` as `main.X`.
+
+Per-category thresholds and targets:
+- `PROFILE_THRESHOLD_IDENTITY`, default 100 - word count that triggers compaction for identity
+- `PROFILE_TARGET_IDENTITY`, default 60 - target word count after compacting identity
+- `PROFILE_THRESHOLD_ONGOING_CONTEXT`, default 200 - word count that triggers compaction for ongoing_context
+- `PROFILE_TARGET_ONGOING_CONTEXT`, default 120 - target word count after compacting ongoing_context
+- `PROFILE_THRESHOLD_PREFERENCE`, default 100 - word count that triggers compaction for preference
+- `PROFILE_TARGET_PREFERENCE`, default 60 - target word count after compacting preference
+- `PROFILE_THRESHOLD_INSTRUCTION`, default 100 - word count that triggers compaction for instruction
+- `PROFILE_TARGET_INSTRUCTION`, default 60 - target word count after compacting instruction
+
+Overall safety cap:
+- `PROFILE_MAX_INJECT_WORDS`, default 500 - hard cap on total injected profile text. If exceeded, truncate and log a warning rather than silently sending an oversized prompt. *(As built: truncation happens at entry boundaries, and entries that don't fit are left out whole. See approved change 17.)*
+
+Token limits for the new LLM calls:
+- `PROFILE_EXTRACTION_MAX_TOKENS`, default same as `MAX_OUTPUT_TOKENS` (500) - output token cap for the extraction call
+- `PROFILE_COMPACTION_MAX_TOKENS`, default same as `MAX_OUTPUT_TOKENS` (500) - output token cap for the compaction call
+
+Kill switches:
+- `PROFILE_EXTRACTION_ENABLED`, default true - if false, `process_message_for_profile` returns immediately without calling the model
+- `PROFILE_COMPACTION_ENABLED`, default true - if false, `compact_category` is never triggered regardless of word count

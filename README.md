@@ -23,27 +23,29 @@ Settings are read from `.env`, which is gitignored and never committed:
 GEMINI_API_KEY=your-key
 OPENAI_API_KEY=your-key            # only needed for openai/ models
 
-LLM_MODEL=gemini/gemini-3.8-flash
+CHAT_LLM=gemini/gemini-3.8-flash
+EXTRACTION_LLM=gemini/gemini-3.5-flash-lite
+COMPACTION_LLM=gemini/gemini-3.5-flash-lite
 ```
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `LLM_MODEL` | `gemini/gemini-3.5-flash-lite` | LiteLLM model name. The prefix picks the provider. |
-| `CHAT_LLM` | `LLM_MODEL` | Model for chat replies. |
+| `CHAT_LLM` | `LLM_MODEL` | Model for chat replies (a LiteLLM model name; the prefix picks the provider). |
 | `EXTRACTION_LLM` | `CHAT_LLM` | Model that pulls profile facts out of each message. |
 | `COMPACTION_LLM` | `EXTRACTION_LLM` | Model that shortens a profile category once it grows past its limit. |
 | `PROFILE_THRESHOLD_<CATEGORY>` / `PROFILE_TARGET_<CATEGORY>` | 100 / 60 (`ONGOING_CONTEXT`: 200 / 120) | Word count that triggers compaction, and the size to compact to. `<CATEGORY>` is `IDENTITY`, `ONGOING_CONTEXT`, `PREFERENCE` or `INSTRUCTION`. |
-| `PROFILE_MAX_INJECT_WORDS` | 500 | Word cap on the profile added to the prompt. |
+| `PROFILE_MAX_INJECT_WORDS` | 500 | Word cap on the profile added to the prompt. Entries that don't fit are left out whole, with a warning. |
 | `PROFILE_EXTRACTION_MAX_TOKENS` / `PROFILE_COMPACTION_MAX_TOKENS` | 500 / 500 | Output token caps for the two profile calls. |
 | `PROFILE_EXTRACTION_ENABLED` / `PROFILE_COMPACTION_ENABLED` | `true` / `true` | Kill switches. `false` turns the step off. |
+| `LLM_MODEL` | `gemini/gemini-3.5-flash-lite` | Legacy fallback, used only if `CHAT_LLM` is unset. |
 | `LLM_REASONING_EFFORT` | chosen per provider | Optional override. Normally leave unset (see below). |
 | `DB_PATH` | `sessions.db` | SQLite file for chat history. |
 | `API_URL` | `http://127.0.0.1:8000/chat` | Where the Streamlit console sends requests. |
 
 - **Keep the provider prefix on Gemini models** (`gemini/…`). Without it, LiteLLM routes to Vertex AI, which needs full Google Cloud credentials instead of an API key.
-- **Reasoning effort is picked automatically**: `minimal` for `openai/` models and `low` for `gemini/` models (`gemini-3.8-flash` rejects `minimal`). Changing `LLM_MODEL` is enough to switch providers.
+- **Reasoning effort is picked automatically**: `minimal` for `openai/` models and `low` for `gemini/` models (`gemini-3.8-flash` rejects `minimal`). Changing a task's model setting is enough to switch providers.
 - **Free-tier quota is per model** (20 requests a day on `gemini-3.8-flash`). A real chat message uses 2 or more requests because of profile extraction. Putting `EXTRACTION_LLM`/`COMPACTION_LLM` on a different model, such as `gemini/gemini-3.5-flash-lite`, gives those steps their own quota.
-- To keep several models on hand, list them as `LLM_MODEL_1=…`, `LLM_MODEL_2=…` and select one with `LLM_MODEL=${LLM_MODEL_2}`. Both local runs and Docker Compose expand the reference.
+- To keep a list of available models in `.env` for yourself, `LLM_MODEL_1=…`, `LLM_MODEL_2=…` entries are fine, but the app never reads them. Set each model setting to a literal value.
 
 ## API
 
