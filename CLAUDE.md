@@ -8,25 +8,19 @@ PakGPT is a minimal FastAPI chat backend backed by an LLM (via LiteLLM, so any p
 
 ## Running it
 
-Activate the venv first (Windows): `venv\Scripts\activate.bat`
-
-Start the API:
+The app is run and tested **only through Docker Compose**, locally:
 ```
-uvicorn main:app --reload --port 8000
+docker compose up --build
 ```
+The API is at `http://127.0.0.1:8000`, the console at `http://127.0.0.1:8501` (both bound to localhost only, since `/chat` has no auth). Session history persists across `docker compose down && up` in the `sessions-data` named volume, mounted at `/app/data` in the `api` container (`DB_PATH` is set to `/app/data/sessions.db` there — mounting a volume at `/app` itself would shadow the image's code on every rebuild, so don't move it). There's no bind mount or `--reload`, so code changes need `docker compose up --build` to take effect.
 
-Start the test console (in a separate terminal, API must already be running):
-```
-streamlit run streamlit.py
-```
+Anything that touches the database (scripts, inspecting or seeding test rows) runs inside the container, e.g. `docker compose exec api python ...`. The image has Python but no `sqlite3` CLI.
 
-Install/update dependencies: `pip install -r requirements.txt`
+`requirements-api.txt` and `requirements-streamlit.txt` list only each service's *direct* dependencies (pinned), letting pip resolve the transitive closure at build time. When a direct dependency changes, update the file for the service that uses it (`python-dotenv` is in both).
 
-### Docker
+`docker/api.Dockerfile` copies only `main.py` and `scripts/` into the image, and `docker/streamlit.Dockerfile` copies only `streamlit.py`. Any new file a service needs at runtime must be added to its Dockerfile. Compose's `api` healthcheck calls `GET /`, and `streamlit` waits on it (`service_healthy`), so keep that route working.
 
-`docker compose up --build` runs both services. The API is at `http://127.0.0.1:8000`, the console at `http://127.0.0.1:8501` (both bound to localhost only, since `/chat` has no auth). Session history persists across `docker compose down && up` in the `sessions-data` named volume, mounted at `/app/data` in the `api` container (`DB_PATH` is set to `/app/data/sessions.db` there — mounting a volume at `/app` itself would shadow the image's code on every rebuild, so don't move it).
-
-`requirements-api.txt` and `requirements-streamlit.txt` list only each service's *direct* dependencies (pinned), letting pip resolve the transitive closure at build time — `requirements.txt` (the full frozen set for local/venv use) isn't safe to split by hand, since packages like `tiktoken`/`huggingface-hub` look Streamlit-related but are actually pulled in by `litellm`. Keep all three files in sync when a direct dependency's version changes.
+The repo folder still holds a leftover `venv/` and `sessions.db` from before the Docker-only setup. Both are gitignored and dockerignored and kept on purpose, since `sessions.db` has older history that isn't in the volume. The app never reads that file, so don't query or seed it when verifying behavior.
 
 ## Configuration
 
@@ -48,10 +42,13 @@ Environment variables are loaded from `.env` (gitignored):
 - Cost is computed via `litellm.completion_cost(completion_response=response)`; if the model isn't in litellm's cost map this raises, so it's wrapped in a try/except that stores `cost_usd = NULL` and logs a warning naming the model — the request still succeeds. `latency_ms` wraps only the `completion()` call.
 - Token usage and cost-calculation warnings go through `logging` (`logging.basicConfig(level=logging.INFO)`), not `print()`.
 - Errors from the LLM call are caught broadly and surfaced as a 502 with the underlying exception message.
-- `scripts/migrate_sessions.py` is a one-off migration for the previous JSON-blob schema: it copies each legacy session's messages into `messages` (in original order; every migrated message gets that session's old `updated_at` as its `created_at`, since the blob format never recorded per-message timestamps) and renames the old `sessions` table to `sessions_legacy` (never dropped). Safe to re-run — it no-ops once `sessions` no longer exists. Run locally with `python scripts/migrate_sessions.py` (from the repo root, matching `DB_PATH`'s default), or against the Docker volume with `docker compose exec api python scripts/migrate_sessions.py`.
-- `scripts/llm_usage.py` is an on-demand reporting script: it queries `llm_calls` and writes (overwriting) three CSVs into a `reports/` folder (gitignored) — `llm_usage_by_session.csv`, `llm_usage_by_model.csv`, `llm_usage_by_day.csv` — each with call count, token totals, `cost_usd`, and `avg_latency_ms` for that grouping. Run the same way as the migration script: locally (`python scripts/llm_usage.py`) or against the Docker volume (`docker compose exec api python scripts/llm_usage.py`).
+- `scripts/llm_usage.py` is an on-demand reporting script: it queries `llm_calls` and writes (overwriting) three CSVs into a `reports/` folder (gitignored) — `llm_usage_by_session.csv`, `llm_usage_by_model.csv`, `llm_usage_by_day.csv` — each with call count, token totals, `cost_usd`, and `avg_latency_ms` for that grouping. Run it with `docker compose exec api python scripts/llm_usage.py`. That writes the CSVs inside the container, so copy them out with `docker compose cp api:/app/reports/. ./reports/docker`.
 
-`streamlit.py` is a standalone manual test console, not part of the API: it POSTs to `API_URL`, keeps a client-side `st.session_state.history` of all turns in the run, and lets you inspect the exact `context` (message list) sent to the model for each turn via an expander. It is not authoritative for session state — the backend's SQLite store is.
+`streamlit.py` is a standalone manual test console, not part of the API: it POSTs to `API_URL`, keeps a client-side `st.session_state.history` of all turns in the run, and lets you inspect the exact `context` (message list) sent to the model for each turn via an expander. It is not authoritative for session state — the backend's SQLite store is. It never sends `dry_run`, so **every message sent from the console is a real, paid LLM call**. Its `requests.post` timeout (30s) equals the API's LLM timeout, so a call that needs its one retry can time out in the console even though the API finishes and saves the turn.
+
+`scripts/llm_usage.py` imports `DB_PATH` from `main`. Renaming it breaks the script, and importing `main` also loads `.env` and `litellm`. A comment in `main.py` asks that the app's SQL stay in its helper functions so that a later Postgres switch touches only that file.
+
+`PRODUCT_SPEC.md` §9 lists what comes next: Phase 2 adds user accounts with a `users` table, `user_id` on both tables, and a per-user daily cap, plus Caddy/HTTPS deployment. Read it before starting work in those areas.
 
 ## Development principles
 
@@ -74,6 +71,7 @@ Every LLM call through `/chat` is real — it spends real tokens and real money,
 
 - **Use `dry_run: true` for anything that just needs to exercise the request/DB path** (a new field on `ChatRequest`, a schema change, the read/trim logic) — it costs nothing and skips the real model call. Reach for a real call only when the thing under test is actual model behavior (prompt wording, response quality, provider-specific quirks).
 - **Test session_ids must be clearly marked and timestamped**, e.g. `test-<purpose>-<UTC YYYYMMDDHHMMSS>` (e.g. `test-ctxwindow-20260927154812`) — never a bare, reusable name like `ctx-test`. This keeps repeated test runs from landing on the same `session_id` (so they don't visually merge into what looks like one long conversation) and keeps them identifiable later in `llm_usage_*.csv`/`llm_calls` as test traffic, not real usage.
+- Dry-run smoke test (with the API running): `curl -X POST http://127.0.0.1:8000/chat -H "Content-Type: application/json" -d '{"session_id": "test-dryrun-<UTC YYYYMMDDHHMMSS>", "message": "hello", "dry_run": true}'`
 - **Minimize the number of real LLM calls a test needs.** Every live `/chat` call costs tokens; don't spend 25 of them to prove something that doesn't require 25 real completions. E.g. to verify context-window trimming, seed the `messages` table directly via SQL (fake rows, no LLM involved) to build up history, then make exactly one real `/chat` call to confirm the read/trim path — not a loop of real calls building history one at a time.
 - **Test data is never auto-deleted** — it accumulates in `sessions.db`/`llm_calls` exactly like real usage, and stays there. Clear naming (above) is how it's kept distinguishable, not cleanup after the fact. Deleting rows is a real, destructive action — only do it if explicitly asked.
 

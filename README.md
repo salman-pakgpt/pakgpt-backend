@@ -4,7 +4,7 @@ A minimal chat backend: one FastAPI endpoint that sends a conversation to an LLM
 
 Models are called through [LiteLLM](https://docs.litellm.ai/), so you switch providers (Gemini, OpenAI, Anthropic, …) by changing one environment variable. The default is Google's `gemini-3.5-flash-lite`, which is on the free tier.
 
-## Quick start (Docker)
+## Quick start
 
 1. Create a `.env` file in the repo root (see [Configuration](#configuration)).
 2. Start both services:
@@ -14,19 +14,6 @@ Models are called through [LiteLLM](https://docs.litellm.ai/), so you switch pro
 3. Open the test console at http://127.0.0.1:8501. The API itself is at http://127.0.0.1:8000.
 
 Both ports are bound to `127.0.0.1` only, because `/chat` has no authentication. Chat history is kept in the `sessions-data` Docker volume, so it survives `docker compose down` and `up`.
-
-## Running without Docker
-
-Requires Python 3.11.
-
-```
-python -m venv venv
-venv\Scripts\activate.bat          # Windows; use `source venv/bin/activate` elsewhere
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
-```
-
-In a second terminal (with the API running): `streamlit run streamlit.py`
 
 ## Configuration
 
@@ -79,12 +66,9 @@ A dry run returns a canned reply and stores rows marked `is_test = 1` with zero 
 
 When you do need a real test call, use a session id like `test-<purpose>-<UTC timestamp>` so test traffic is easy to tell apart from real usage later. Test rows are never deleted automatically.
 
-## Scripts
+## Usage reports
 
-- `python scripts/llm_usage.py` writes three CSV reports to `reports/`: usage by session, by model, and by day (calls, tokens, cost, average latency).
-- `python scripts/migrate_sessions.py` is a one-time migration from the old single-table session format. It is safe to re-run.
-
-Against the Docker database, run them inside the container, e.g. `docker compose exec api python scripts/llm_usage.py`.
+`docker compose exec api python scripts/llm_usage.py` writes three CSV reports to `reports/` inside the container: usage by session, by model, and by day (calls, tokens, cost, average latency). Copy them out with `docker compose cp api:/app/reports/. ./reports/docker`.
 
 Note on cost: LiteLLM prices Gemini calls at paid-tier rates, so `cost_usd` shows small amounts even on the free tier. Treat it as what the traffic would cost on a paid plan, not as your actual bill.
 
@@ -93,9 +77,9 @@ Note on cost: LiteLLM prices Gemini calls at paid-tier rates, so `cost_usd` show
 ```
 main.py                     the whole API: endpoint, model call, SQLite storage
 streamlit.py                manual test console (not part of the API)
-scripts/                    usage reports and the one-off migration
+scripts/                    usage report script
 docker/, docker-compose.yml container setup for both services
-requirements*.txt           full local set, plus per-container lists for Docker
+requirements-*.txt          pinned dependencies for each container
 ```
 
 There is no automated test suite yet.

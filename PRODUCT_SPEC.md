@@ -1,6 +1,6 @@
 # PakGPT — Product Specification
 
-**Last updated:** 2026-09-28 · **Code as of:** commit `9008859` · **Phase:** 1 complete, Phase 2 not started
+**Last updated:** 2026-10-01 · **Code as of:** commit `69cebe6` · **Phase:** 1 complete, Phase 2 not started
 
 This is the handover document. Together with access to the codebase, it should tell a new owner everything about where the product stands. Section 2 describes what exists today; section 9 lists what comes next. Update both in the same change that ships something, and bump the date and commit above.
 
@@ -104,8 +104,8 @@ All settings come from `.env`, which is never committed. Full table in [README.m
 ## 7. Operating it
 
 - **Run:** `docker compose up --build`, then open http://127.0.0.1:8501. Details and the non-Docker route are in the README.
-- **Usage reports:** `docker compose exec api python scripts/llm_usage.py` writes CSVs inside the container; copy them out with `docker compose cp`.
-- **Two databases:** running from the venv uses `sessions.db` in the project folder, while Docker uses its own database in the `sessions-data` volume. They don't sync. The Docker one is the one that matters.
+- **Usage reports:** `docker compose exec api python scripts/llm_usage.py` writes CSVs inside the container; copy them out with `docker compose cp api:/app/reports/. ./reports/docker`.
+- **Docker only:** the app is run and tested only through Docker Compose. The live database is in the `sessions-data` volume. A leftover `sessions.db` in the project folder, from earlier venv runs, is kept as an archive but is no longer used.
 - **Testing rules:**
   - Use `dry_run: true` whenever the model's actual answer doesn't matter.
   - Name real test conversations `test-<purpose>-<UTC timestamp>`.
@@ -195,3 +195,4 @@ The two workstreams can run in either order or in parallel, with one constraint:
 | 2026-09-28 | Default to Gemini (`gemini-3.8-flash` in `.env`) | Free tier for the demo. `gemini-2.5-flash-lite` is closed to new users. |
 | 2026-09-28 | Reasoning setting chosen per provider | `gemini-3.8-flash` rejects the OpenAI-style `minimal` setting; switching `LLM_MODEL` should be the only change needed. |
 | 2026-09-28 | Added `tenacity` | Without it, LiteLLM's retry never ran, and failures showed a misleading error. |
+| 2026-10-01 | Docker Compose is the only supported way to run and test | One environment to reason about. Removed the venv-only `requirements.txt` and the already-applied `migrate_sessions.py`. |
