@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-PakGPT is a minimal FastAPI chat backend backed by an LLM (via LiteLLM, so any provider LiteLLM supports can be swapped in through `LLM_MODEL`), plus a Streamlit console for manually exercising it. It's a two-file prototype, not a package — there's no build step, test suite, or linter configured.
+PakGPT is a minimal FastAPI chat backend backed by an LLM (via LiteLLM, so any provider LiteLLM supports can be swapped in through `LLM_MODEL`), plus a Streamlit console for manually exercising it. It's a small flat prototype (`main.py`, `profile_manager.py`, `streamlit.py`), not a package — there's no build step, test suite, or linter configured.
 
 ## Running it
 
@@ -18,7 +18,7 @@ Anything that touches the database (scripts, inspecting or seeding test rows) ru
 
 `requirements-api.txt` and `requirements-streamlit.txt` list only each service's *direct* dependencies (pinned), letting pip resolve the transitive closure at build time. When a direct dependency changes, update the file for the service that uses it (`python-dotenv` is in both).
 
-`docker/api.Dockerfile` copies only `main.py` and `scripts/` into the image, and `docker/streamlit.Dockerfile` copies only `streamlit.py`. Any new file a service needs at runtime must be added to its Dockerfile. Compose's `api` healthcheck calls `GET /`, and `streamlit` waits on it (`service_healthy`), so keep that route working.
+`docker/api.Dockerfile` copies only `main.py`, `profile_manager.py` and `scripts/` into the image, and `docker/streamlit.Dockerfile` copies only `streamlit.py`. Any new file a service needs at runtime must be added to its Dockerfile. Compose's `api` healthcheck calls `GET /`, and `streamlit` waits on it (`service_healthy`), so keep that route working.
 
 The repo folder still holds a leftover `venv/` and `sessions.db` from before the Docker-only setup. Both are gitignored and dockerignored and kept on purpose, since `sessions.db` has older history that isn't in the volume. The app never reads that file, so don't query or seed it when verifying behavior.
 
@@ -27,7 +27,15 @@ The repo folder still holds a leftover `venv/` and `sessions.db` from before the
 Environment variables are loaded from `.env` (gitignored):
 - `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` — provider keys consumed by LiteLLM based on which `LLM_MODEL` is selected.
 - `LLM_MODEL` — LiteLLM model string, e.g. `gemini/gemini-3.5-flash-lite` (default, free tier). Keep the `gemini/` prefix — a bare Gemini model name makes LiteLLM route to Vertex AI, which needs full GCP credentials rather than just `GEMINI_API_KEY`. Change the provider prefix to switch providers. The local `.env` keeps candidate models as numbered `LLM_MODEL_<n>` entries and selects one with e.g. `LLM_MODEL=${LLM_MODEL_2}`; the app reads only `LLM_MODEL`, and both python-dotenv and Docker Compose's `env_file` expand the `${...}` reference.
-- `LLM_REASONING_EFFORT` — optional override. Normally unset: `main.py` picks `reasoning_effort` from `LLM_MODEL`'s provider prefix via `REASONING_EFFORT_BY_PROVIDER` (`openai` → `minimal`, `gemini` → `low`, since `gemini-3.8-flash` rejects `minimal` with a 400), so switching `LLM_MODEL` alone is enough. Providers not in that table (e.g. `anthropic/`) send no reasoning parameter; add an entry after verifying what the provider accepts.
+- `CHAT_LLM`, `EXTRACTION_LLM`, `COMPACTION_LLM` — per-task models, each optional. Unset ones fall back in the order `COMPACTION_LLM` → `EXTRACTION_LLM` → `CHAT_LLM` → `LLM_MODEL`, so with none set everything uses `LLM_MODEL`. The local `.env` sets extraction and compaction to `gemini/gemini-3.5-flash-lite`, which has its own free-tier quota. LiteLLM rejects `reasoning_effort` for a `gemini/` model name it doesn't know, so use real model names.
+- `PROFILE_*` — user-profile tuning, all optional. Unset, they keep the documented behavior:
+  - `PROFILE_THRESHOLD_<CATEGORY>` and `PROFILE_TARGET_<CATEGORY>`: compaction thresholds and targets. The defaults are 100/60, and 200/120 for `ONGOING_CONTEXT`.
+  - `PROFILE_MAX_INJECT_WORDS` (default 500): a word cap on the profile text injected into the prompt. The markdown for `/profile` is never capped.
+  - `PROFILE_EXTRACTION_MAX_TOKENS` and `PROFILE_COMPACTION_MAX_TOKENS` (default 500 each).
+  - `PROFILE_EXTRACTION_ENABLED` and `PROFILE_COMPACTION_ENABLED`: kill switches, on by default. Set one to `false` or `0` to turn it off.
+
+  All of these are read in `main.py`, after `load_dotenv()`, and `profile_manager` reads them as `main.X` at call time.
+- `LLM_REASONING_EFFORT` — optional override. Normally unset: `main.reasoning_effort(model)` picks `reasoning_effort` from each task's model's provider prefix via `REASONING_EFFORT_BY_PROVIDER` (`openai` → `minimal`, `gemini` → `low`, since `gemini-3.8-flash` rejects `minimal` with a 400), so switching `LLM_MODEL` alone is enough. Providers not in that table (e.g. `anthropic/`) send no reasoning parameter; add an entry after verifying what the provider accepts.
 - `DB_PATH` — SQLite file path for session storage (default `sessions.db`).
 - `API_URL` — used only by `streamlit.py` to reach the FastAPI backend (default `http://127.0.0.1:8000/chat`).
 
@@ -44,11 +52,24 @@ Environment variables are loaded from `.env` (gitignored):
 - Errors from the LLM call are caught broadly and surfaced as a 502 with the underlying exception message.
 - `scripts/llm_usage.py` is an on-demand reporting script: it queries `llm_calls` and writes (overwriting) three CSVs into a `reports/` folder (gitignored) — `llm_usage_by_session.csv`, `llm_usage_by_model.csv`, `llm_usage_by_day.csv` — each with call count, token totals, `cost_usd`, and `avg_latency_ms` for that grouping. Run it with `docker compose exec api python scripts/llm_usage.py`. That writes the CSVs inside the container, so copy them out with `docker compose cp api:/app/reports/. ./reports/docker`.
 
-`streamlit.py` is a standalone manual test console, not part of the API: it POSTs to `API_URL`, keeps a client-side `st.session_state.history` of all turns in the run, and lets you inspect the exact `context` (message list) sent to the model for each turn via an expander. It is not authoritative for session state — the backend's SQLite store is. It never sends `dry_run`, so **every message sent from the console is a real, paid LLM call**. Its `requests.post` timeout (30s) equals the API's LLM timeout, so a call that needs its one retry can time out in the console even though the API finishes and saves the turn.
+`streamlit.py` is a standalone manual test console, not part of the API: it POSTs to `API_URL`, keeps a client-side `st.session_state.history` of all turns in the run, and lets you inspect the exact `context` (message list) sent to the model for each turn via an expander. A right-hand pane renders `GET /profile`, whose address is derived from `API_URL`. It re-fetches on every rerun and has a "Refresh profile" button. It is not authoritative for session state — the backend's SQLite store is. It never sends `dry_run`, so **every message sent from the console is a real, paid LLM call**. Its `requests.post` timeout (30s) equals the API's LLM timeout, so a call that needs its one retry can time out in the console even though the API finishes and saves the turn.
+
+**User profile (`profile_manager.py`; see `PRODUCT_SPEC.md` §9 and `docs/profile_module_requirements.md`):**
+- A per-user `profile` table holds durable facts in four categories: `identity`, `ongoing_context`, `preference` and `instruction`. Each entry's `status` is `active`, `superseded` or `deleted`. Entries are never deleted as rows; they are only re-marked.
+- `messages` and `llm_calls` both have a `user_id` column. Everything uses `DEFAULT_USER_ID = "local_user"` until Phase 2 adds logins.
+- `chat()` appends the active profile to the single system message under `PROFILE_HEADER`, which tells the model that the profile wins over `SYSTEM_PROMPT`. This also happens on dry runs, so seed `profile` rows and make a dry run to check injection for free.
+- `GET /profile` returns `{"markdown": ...}` for the console's right-hand pane. It deliberately takes no `user_id` parameter.
+- `save_turn` takes `user_id` and returns the user message's id, for extraction.
+- `profile_manager` does `import main` and reads config as `main.X` at call time. The circular import is deliberate: `main` imports `profile_manager` at the top, so never use `from main import ...` there.
+- **Extraction:** after each non-dry-run reply, `chat()` schedules `process_message_for_profile` as a `BackgroundTasks` job. It makes one structured-output call (`response_format` set to a Pydantic model), validates each `add`/`update`/`delete` against the user's active entries, and applies the valid ones in one transaction. Jobs run one at a time under a module lock, and failures are logged, never raised.
+- **Compaction:** runs for a category the message touched once that category passes its `main.PROFILE_WORD_LIMITS` threshold. It supersedes the old entries and inserts the rewrite in one transaction, and a failed call or an empty result changes nothing. Compaction entries record the triggering message as their source.
+- **Logging:** both calls are logged to `llm_calls` with `call_type` set to `extraction` or `compaction`, and `message_id` set to the user message. Token and cost handling is shared with `chat()` through `main.response_usage()`.
+- **Free testing:** to test extraction and compaction without paying, patch `profile_manager.completion` (and `main.completion`) with a wrapper around `litellm.completion(..., mock_response=<json>)`, and run it against a copy of the database: `docker compose run --rm --no-deps -T -e DB_PATH=/tmp/x.db api python -`. From Git Bash, prefix the command with `MSYS_NO_PATHCONV=1`, or the `/tmp` path gets rewritten.
+- **Real calls are scarce:** Gemini's free tier allows only 20 requests per day per model, and each real chat message now uses 2 or more. Retries and failed attempts count too.
 
 `scripts/llm_usage.py` imports `DB_PATH` from `main`. Renaming it breaks the script, and importing `main` also loads `.env` and `litellm`. A comment in `main.py` asks that the app's SQL stay in its helper functions so that a later Postgres switch touches only that file.
 
-`PRODUCT_SPEC.md` §9 lists what comes next: Phase 2 adds user accounts with a `users` table, `user_id` on both tables, and a per-user daily cap, plus Caddy/HTTPS deployment. Read it before starting work in those areas.
+`PRODUCT_SPEC.md` §9–10 list what comes next, in order. §9 is the user profile module (`profile_manager.py`, extraction through `BackgroundTasks`, a live profile pane), with sequenced action items and review gaps. §10 is Phase 2: user accounts, a per-user daily cap, and Caddy/HTTPS deployment. Read the relevant section before starting work in either area.
 
 ## Development principles
 

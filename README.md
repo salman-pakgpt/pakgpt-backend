@@ -29,12 +29,20 @@ LLM_MODEL=gemini/gemini-3.8-flash
 | Variable | Default | Purpose |
 |---|---|---|
 | `LLM_MODEL` | `gemini/gemini-3.5-flash-lite` | LiteLLM model name. The prefix picks the provider. |
+| `CHAT_LLM` | `LLM_MODEL` | Model for chat replies. |
+| `EXTRACTION_LLM` | `CHAT_LLM` | Model that pulls profile facts out of each message. |
+| `COMPACTION_LLM` | `EXTRACTION_LLM` | Model that shortens a profile category once it grows past its limit. |
+| `PROFILE_THRESHOLD_<CATEGORY>` / `PROFILE_TARGET_<CATEGORY>` | 100 / 60 (`ONGOING_CONTEXT`: 200 / 120) | Word count that triggers compaction, and the size to compact to. `<CATEGORY>` is `IDENTITY`, `ONGOING_CONTEXT`, `PREFERENCE` or `INSTRUCTION`. |
+| `PROFILE_MAX_INJECT_WORDS` | 500 | Word cap on the profile added to the prompt. |
+| `PROFILE_EXTRACTION_MAX_TOKENS` / `PROFILE_COMPACTION_MAX_TOKENS` | 500 / 500 | Output token caps for the two profile calls. |
+| `PROFILE_EXTRACTION_ENABLED` / `PROFILE_COMPACTION_ENABLED` | `true` / `true` | Kill switches. `false` turns the step off. |
 | `LLM_REASONING_EFFORT` | chosen per provider | Optional override. Normally leave unset (see below). |
 | `DB_PATH` | `sessions.db` | SQLite file for chat history. |
 | `API_URL` | `http://127.0.0.1:8000/chat` | Where the Streamlit console sends requests. |
 
 - **Keep the provider prefix on Gemini models** (`gemini/…`). Without it, LiteLLM routes to Vertex AI, which needs full Google Cloud credentials instead of an API key.
 - **Reasoning effort is picked automatically**: `minimal` for `openai/` models and `low` for `gemini/` models (`gemini-3.8-flash` rejects `minimal`). Changing `LLM_MODEL` is enough to switch providers.
+- **Free-tier quota is per model** (20 requests a day on `gemini-3.8-flash`). A real chat message uses 2 or more requests because of profile extraction. Putting `EXTRACTION_LLM`/`COMPACTION_LLM` on a different model, such as `gemini/gemini-3.5-flash-lite`, gives those steps their own quota.
 - To keep several models on hand, list them as `LLM_MODEL_1=…`, `LLM_MODEL_2=…` and select one with `LLM_MODEL=${LLM_MODEL_2}`. Both local runs and Docker Compose expand the reference.
 
 ## API
@@ -50,6 +58,8 @@ Returns `{ "session_id", "reply", "context" }`, where `context` is the exact mes
 - Leave out `session_id` on the first message; a new one is created and returned. Send it back on every later message to continue that conversation.
 - Only the most recent 20 messages of a session are sent to the model.
 - LLM failures return HTTP 502 with the provider's error message. Calls time out after 30 seconds and are retried once.
+
+`GET /profile` returns the stored user profile as markdown: `{ "markdown": "..." }`. The profile holds durable facts about the user, and it is appended to the system prompt on every chat call. After each real (non-dry-run) reply, a background step makes a second LLM call to pull new facts from the user's message. A new fact therefore appears in the profile shortly after the reply, not with it. Dry runs skip this step. The test console shows it in a pane on the right.
 
 `GET /` is a health check that returns `{"status": "ok"}`.
 
@@ -75,8 +85,10 @@ Note on cost: LiteLLM prices Gemini calls at paid-tier rates, so `cost_usd` show
 ## Project layout
 
 ```
-main.py                     the whole API: endpoint, model call, SQLite storage
-streamlit.py                manual test console (not part of the API)
+main.py                     the API: endpoints, model call, SQLite storage
+profile_manager.py          user profile: read, format, extraction, compaction
+streamlit.py                manual test console with a live profile pane (not part of the API)
+docs/                       feature requirements
 scripts/                    usage report script
 docker/, docker-compose.yml container setup for both services
 requirements-*.txt          pinned dependencies for each container

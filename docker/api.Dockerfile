@@ -6,6 +6,7 @@ COPY requirements-api.txt .
 RUN pip install --no-cache-dir -r requirements-api.txt
 
 COPY main.py .
+COPY profile_manager.py .
 COPY scripts/ scripts/
 
 RUN useradd --create-home appuser \

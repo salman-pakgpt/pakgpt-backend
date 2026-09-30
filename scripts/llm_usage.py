@@ -33,6 +33,7 @@ QUERIES = {
         """
         SELECT
             model,
+            call_type,
             COUNT(*) AS calls,
             SUM(input_tokens) AS input_tokens,
             SUM(output_tokens) AS output_tokens,
@@ -41,10 +42,10 @@ QUERIES = {
             AVG(latency_ms) AS avg_latency_ms
         FROM llm_calls
         WHERE is_test = 0
-        GROUP BY model
+        GROUP BY model, call_type
         ORDER BY cost_usd DESC
         """,
-        ["model", "calls", "input_tokens", "output_tokens", "reasoning_tokens",
+        ["model", "call_type", "calls", "input_tokens", "output_tokens", "reasoning_tokens",
          "cost_usd", "avg_latency_ms"],
     ),
     "by_day": (
