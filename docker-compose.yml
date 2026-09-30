@@ -9,6 +9,7 @@ services:
       - DB_PATH=/app/data/sessions.db
     volumes:
       - sessions-data:/app/data
+      - ./reports:/app/reports  # scripts/llm_usage.py writes here, straight to the host's reports/
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck:

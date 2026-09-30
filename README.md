@@ -80,7 +80,7 @@ When you do need a real test call, use a session id like `test-<purpose>-<UTC ti
 
 ## Usage reports
 
-`docker compose exec api python scripts/llm_usage.py` writes three CSV reports to `reports/` inside the container: usage by session, by model, and by day (calls, tokens, cost, average latency). Copy them out with `docker compose cp api:/app/reports/. ./reports/docker`.
+`docker compose exec api python scripts/llm_usage.py` writes three CSV reports straight to `reports/` in the repo folder, through a bind mount: usage by session, by model and call type, and by day (calls, tokens, cost, average latency). Each run overwrites them. Older reports are in `reports/archive/`.
 
 Note on cost: LiteLLM prices Gemini calls at paid-tier rates, so `cost_usd` shows small amounts even on the free tier. Treat it as what the traffic would cost on a paid plan, not as your actual bill.
 

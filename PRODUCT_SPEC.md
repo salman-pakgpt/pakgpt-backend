@@ -123,7 +123,7 @@ All settings come from `.env`, which is never committed. Full table in [README.m
 ## 7. Operating it
 
 - **Run:** `docker compose up --build`, then open http://127.0.0.1:8501. Details and the non-Docker route are in the README.
-- **Usage reports:** `docker compose exec api python scripts/llm_usage.py` writes CSVs inside the container; copy them out with `docker compose cp api:/app/reports/. ./reports/docker`.
+- **Usage reports:** `docker compose exec api python scripts/llm_usage.py` writes the CSVs directly to `reports/` in the project folder, through a bind mount, so there's one copy and nothing to copy out. Older reports are in `reports/archive/`.
 - **Docker only:** the app is run and tested only through Docker Compose. The live database is in the `sessions-data` volume. A leftover `sessions.db` in the project folder, from earlier venv runs, is kept as an archive but is no longer used.
 - **Testing rules:**
   - Use `dry_run: true` whenever the model's actual answer doesn't matter.
